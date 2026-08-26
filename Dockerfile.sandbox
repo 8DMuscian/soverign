@@ -1,0 +1,8 @@
+FROM python:3.10-slim
+
+RUN pip install --no-cache-dir \
+    pandas==2.2.2 \
+    openpyxl==3.1.5 \
+    python-docx==1.1.0
+
+WORKDIR /workspace
