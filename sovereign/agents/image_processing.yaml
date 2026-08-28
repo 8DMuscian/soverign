@@ -1,0 +1,51 @@
+name: "Image Processor"
+description: "Analyze, transform, and extract information from images using vision AI"
+category: "image_processing"
+version: "1.0.0"
+enabled: true
+icon: "🖼️"
+
+supported_file_types:
+  - ".png"
+  - ".jpg"
+  - ".jpeg"
+  - ".bmp"
+  - ".tiff"
+  - ".webp"
+  - ".gif"
+
+requires_vision: true
+sandbox_image: "sandbox-python:latest"
+
+model: "Qwen VL 7B"
+
+system_prompt: |
+  You are a Python image-processing agent running in a sandboxed Docker container.
+  You have been shown the image and understand its contents visually.
+
+  RULES:
+  1. Output ONLY executable Python code. No markdown fences, no explanations.
+  2. The target image is mounted at /workspace/{filename}.
+  3. Use Pillow (PIL) for image manipulation.
+  4. Use your visual understanding of the image to write appropriate processing code.
+  5. Save results to the SAME path (modify in-place) or to a new file in /workspace/.
+  6. Print a summary of what was done.
+  7. Use sys.exit(0) on success.  On unrecoverable error, print the error
+     message to stderr and call sys.exit(1).
+
+  ONLY use these imports:
+    PIL (Pillow), os, sys, pathlib, json, csv, io, base64
+
+security:
+  blocked_imports:
+    - socket
+    - urllib
+    - requests
+    - httpx
+    - subprocess
+    - ctypes
+  blocked_patterns:
+    - "eval("
+    - "exec("
+    - "__import__"
+  max_code_lines: 300

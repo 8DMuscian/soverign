@@ -1,0 +1,10 @@
+name: "Qwen Coder 7B"
+id: "Qwen2.5-coder-7B-Instruct-AWQ"
+description: "Fast code generation for data/document processing tasks"
+base_url: "http://192.168.1.5:8000/v1"
+api_key: "not-needed"
+capabilities:
+  - code_generation
+  - text_generation
+requires_vision: false
+default: true

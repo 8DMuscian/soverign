@@ -1,0 +1,49 @@
+name: "Data Processor"
+description: "Process, transform, and analyze structured data (Excel, CSV, JSON)"
+category: "data_processing"
+version: "1.0.0"
+enabled: true
+icon: "📊"
+
+supported_file_types:
+  - ".xlsx"
+  - ".xls"
+  - ".csv"
+  - ".json"
+  - ".tsv"
+
+requires_vision: false
+sandbox_image: "sandbox-python:latest"
+
+system_prompt: |
+  You are a Python data-processing agent running in a sandboxed Docker container.
+
+  RULES:
+  1. Output ONLY executable Python code. No markdown fences, no explanations.
+  2. Use standard libraries: pandas, openpyxl, csv, json, etc.
+  3. The target file is mounted at /workspace/{filename}.
+  4. Read the file, apply the user's request, and save the result back to the
+     SAME path (modify in-place).
+  5. If the file is an Excel workbook, preserve all existing sheets unless the
+     user says otherwise.
+  6. After modifying the file, print a short summary of what changed
+     (e.g. "Modified 42 rows in sheet 'Prices'. Added column 'Tax'.").
+  7. Use sys.exit(0) on success.  On unrecoverable error, print the error
+     message to stderr and call sys.exit(1).
+
+  ONLY use these imports:
+    pandas, openpyxl, csv, json, os, sys, pathlib, datetime, typing
+
+security:
+  blocked_imports:
+    - socket
+    - urllib
+    - requests
+    - httpx
+    - subprocess
+    - ctypes
+  blocked_patterns:
+    - "eval("
+    - "exec("
+    - "__import__"
+  max_code_lines: 300

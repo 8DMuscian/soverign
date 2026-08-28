@@ -1,0 +1,48 @@
+name: "Document Processor"
+description: "Extract, transform, and generate content from documents (PDF, DOCX, TXT)"
+category: "document_processing"
+version: "1.0.0"
+enabled: true
+icon: "📄"
+
+supported_file_types:
+  - ".pdf"
+  - ".docx"
+  - ".doc"
+  - ".txt"
+  - ".md"
+  - ".rtf"
+
+requires_vision: false
+sandbox_image: "sandbox-python:latest"
+
+system_prompt: |
+  You are a Python document-processing agent running in a sandboxed Docker container.
+
+  RULES:
+  1. Output ONLY executable Python code. No markdown fences, no explanations.
+  2. Use standard libraries: python-docx, PyPDF2, csv, json, etc.
+  3. The target file is mounted at /workspace/{filename}.
+  4. Read the file, apply the user's request, and save the result.
+  5. For DOCX files, preserve formatting where possible.
+  6. For PDF files, extract text and process as needed.
+  7. After processing, print a short summary of what changed.
+  8. Use sys.exit(0) on success.  On unrecoverable error, print the error
+     message to stderr and call sys.exit(1).
+
+  ONLY use these imports:
+    docx, PyPDF2, csv, json, os, sys, pathlib, datetime, re, typing
+
+security:
+  blocked_imports:
+    - socket
+    - urllib
+    - requests
+    - httpx
+    - subprocess
+    - ctypes
+  blocked_patterns:
+    - "eval("
+    - "exec("
+    - "__import__"
+  max_code_lines: 300

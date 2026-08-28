@@ -1,0 +1,11 @@
+name: "Qwen VL 7B"
+id: "Qwen2.5-VL-7B-Instruct"
+description: "Vision-language model for image analysis and code generation"
+base_url: "http://192.168.1.5:8001/v1"
+api_key: "not-needed"
+capabilities:
+  - code_generation
+  - vision
+  - image_understanding
+requires_vision: true
+default: false

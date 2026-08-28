@@ -1,6 +1,6 @@
-# Sovereign AI Workbench — Backend Orchestrator
+# Sovereign AI Workbench — LangGraph Multi-Agent Orchestrator
 
-A fully air-gapped, local-only AI workbench that uses a local LLM to process files. Zero internet required. Zero data leaves your machines.
+A fully air-gapped, local-only AI workbench that uses local LLMs to process files, images, and documents. Built with **LangGraph** and **LangChain** for stateful, graph-based orchestration with automatic retry loops, security scanning, and YAML-based agent/model management. Zero internet required. Zero data leaves your machines.
 
 ---
 
@@ -9,213 +9,282 @@ A fully air-gapped, local-only AI workbench that uses a local LLM to process fil
 ```
 Node 1 (GPU Laptop)                         Node 2 (Mac / Orchestrator)
 ┌───────────────────────────┐              ┌───────────────────────────────┐
-│  vLLM + Qwen2.5-Coder    │              │  orchestrator.py              │
-│  6GB VRAM (AWQ quantized)│◄──── WLAN ──►│  + Docker sandbox             │
-│                           │              │  + target files               │
-└───────────────────────────┘              └───────────────────────────────┘
-         │                                          │
-         │  No router, no internet                  │  network_mode='none'
-         │  Ad-hoc peer-to-peer Wi-Fi               │  Containers cannot phone home
+│  vLLM + LLM models        │              │  sovereign/graph.py           │
+│  (coder + vision models)  │◄──── WLAN ──►│  + Docker sandbox             │
+│                           │              │  + Streamlit frontend         │
+└───────────────────────────┘              │  + Security scanner           │
+         │                                 │  + YAML agent/model registry  │
+         │  No router, no internet         └───────────────────────────────┘
+         │  Ad-hoc peer-to-peer Wi-Fi               │
+         │                                          │  network_mode='none'
+         │                                          │  Containers cannot phone home
 ```
 
 **How it works:**
 
-1. You provide a natural-language prompt + a file path on Node 2
-2. The script asks the LLM on Node 1 to generate Python code
-3. The code is extracted and executed inside an ephemeral, network-disabled Docker container on Node 2
-4. The container bind-mounts your file, modifies it in-place, then self-destructs
+1. You provide a natural-language prompt + a file path (or use the Model Registry agent)
+2. A LangGraph `StateGraph` orchestrates: validate → prompt → LLM → extract → security scan → confirm → sandbox
+3. Security scanning blocks dangerous code before execution
+4. YAML-based agent and model registries allow zero-code agent/model management
+5. Code runs inside ephemeral, network-disabled Docker containers
 
 ---
 
-## Prerequisites
+## Graph Flow
 
-| Requirement | Node 1 (GPU) | Node 2 (Mac) |
-|---|---|---|
-| OS | Linux (recommended) | macOS |
-| Python | 3.10+ | 3.10+ |
-| RAM | 16 GB | 8 GB+ |
-| GPU VRAM | 6 GB+ | N/A |
-| Docker | Not required | Docker Desktop |
-| Network | Ad-hoc WLAN interface | Ad-hoc WLAN interface |
+```
+START
+  │
+  ▼
+validate_file ──► build_prompt ──► call_llm ──► extract_code
+                                                │
+                                     security_scan
+                                                │
+                                   ┌────────────┼────────────┐
+                                   │            │            │
+                              [clean]     [critical]    [retry]
+                                   │            │            │
+                                   ▼            ▼            ▼
+                                confirm    inject_      call_llm
+                                   │      security
+                                   │       error
+                             ┌─────┼─────┐
+                        [approved]  [rejected]
+                             │          │
+                             ▼          ▼
+                        run_sandbox    END
+                        or write_yaml
+                             │
+                       [success] │ [fail + retry]
+                           │     │        │
+                           ▼     ▼        │
+                         END  inject_error│
+                               │          │
+                               └──► call_llm
+```
 
 ---
 
-## Step 1: Network Setup (Ad-hoc WLAN)
+## Project Structure
 
-Both machines must connect to the same ad-hoc Wi-Fi network **before** running anything.
-
-### On Node 1 (GPU Laptop — Linux)
-
-Create an ad-hoc network:
-
-```bash
-# Find your wireless interface name
-iwconfig
-
-# Create ad-hoc network (replace wlan0 with your interface)
-sudo iwconfig wlan0 mode ad-hoc
-sudo iwconfig wlan0 essid "SovereignAI" key s:yourpassword
-sudo ifconfig wlan0 192.168.1.5 netmask 255.255.255.0 up
 ```
-
-### On Node 2 (Mac)
-
-Join the same ad-hoc network:
-
-```bash
-# System Preferences → Network → Wi-Fi → Join ad-hoc network "SovereignAI"
-# Then assign an IP in the same subnet:
-sudo ifconfig en0 192.168.1.10 netmask 255.255.255.0 up
+Sovereign AI/
+├── sovereign/
+│   ├── __init__.py              # Package init (v3.0.0)
+│   ├── state.py                 # TypedDict graph state definition
+│   ├── nodes.py                 # Graph node functions
+│   ├── graph.py                 # LangGraph StateGraph with retry + security edges
+│   ├── cli.py                   # CLI entry point + registries
+│   ├── vision.py                # Multimodal message builder for vision models
+│   ├── models/                  # YAML model registry
+│   │   ├── __init__.py          # ModelRegistry + ModelConfig
+│   │   ├── qwen-coder-7b.yaml  # Coder model config
+│   │   └── qwen-vl-7b.yaml     # Vision model config
+│   ├── agents/                  # YAML agent registry
+│   │   ├── __init__.py          # AgentRegistry + AgentConfig
+│   │   ├── data_processing.yaml
+│   │   ├── image_processing.yaml
+│   │   ├── document_processing.yaml
+│   │   └── model_registry.yaml  # Agent that manages models via YAML
+│   ├── security/                # Code security scanner
+│   │   ├── __init__.py
+│   │   └── scanner.py           # AST + Regex analysis
+│   └── frontend/
+│       ├── __init__.py
+│       └── app.py               # Streamlit dashboard
+├── orchestrator.py              # Backward-compatible entry point
+├── Dockerfile.sandbox           # Docker image for isolated code execution
+├── requirements.txt             # Python dependencies
+├── .env.example                 # Configuration template
+└── README.md                    # This file
 ```
-
-### Verify Connectivity
-
-```bash
-# From Node 2, ping Node 1:
-ping 192.168.1.5
-
-# From Node 1, ping Node 2:
-ping 192.168.1.10
-```
-
-> **Tip:** You can use any IPs in the `192.168.1.x` range as long as both machines are in the same subnet and can ping each other.
 
 ---
 
-## Step 2: Node 1 Setup (vLLM + Model)
+## Quick Start
 
-### Install vLLM
-
-```bash
-pip install vllm
-```
-
-### Download and Serve the Model
-
-```bash
-# Serve the AWQ-quantized Qwen2.5-Coder-7B model
-vllm serve Qwen/Qwen2.5-coder-7B-Instruct-AWQ \
-    --quantization awq \
-    --host 0.0.0.0 \
-    --port 8000 \
-    --max-model-len 4096
-```
-
-### Verify vLLM is Running
-
-```bash
-# From Node 1:
-curl http://localhost:8000/v1/models
-
-# From Node 2 (over WLAN):
-curl http://192.168.1.5:8000/v1/models
-```
-
-You should see a JSON response listing the model name.
-
----
-
-## Step 3: Node 2 Setup (Orchestrator + Docker)
-
-### Clone / Copy Project Files
-
-Copy the entire project folder to Node 2, or clone it from your source.
-
-### Install Python Dependencies
+### 1. Install Dependencies
 
 ```bash
 cd "Sovereign AI"
 pip install -r requirements.txt
 ```
 
-### Configure Environment
+### 2. Configure Environment
 
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env` with your actual Node 1 IP:
+Model and agent configuration is now in YAML files:
+- **Models:** `sovereign/models/*.yaml`
+- **Agents:** `sovereign/agents/*.yaml`
 
-```ini
-VLLM_BASE_URL=http://192.168.1.5:8000/v1
-VLLM_MODEL=Qwen2.5-coder-7B-Instruct-AWQ
-```
-
-### Build the Sandbox Docker Image
+### 3. Build Sandbox Docker Image
 
 ```bash
 docker build -t sandbox-python -f Dockerfile.sandbox .
 ```
 
-This creates a minimal Python image with pandas, openpyxl, and python-docx pre-installed. You only need to build this once.
-
-### Verify Docker is Running
+### 4. Run the Orchestrator
 
 ```bash
-docker info
-docker images sandbox-python
+# List available agents
+python orchestrator.py --list-agents
+
+# List registered models
+python orchestrator.py --list-models
+
+# Process a file
+python orchestrator.py \
+    --agent "Data Processor" \
+    --prompt "Add 5% tax to pricing column" \
+    --file ./data.xlsx
+
+# Image processing (requires vision model)
+python orchestrator.py \
+    --agent "Image Processor" \
+    --prompt "Describe this image" \
+    --file ./photo.jpg \
+    --image ./photo.jpg
+
+# Register a new model (no code changes needed)
+python orchestrator.py \
+    --agent "Model Registry" \
+    --prompt "Add Qwen3-coder-8B, endpoint http://192.168.1.5:8000/v1, make it default"
+```
+
+### 5. Run the Frontend
+
+```bash
+streamlit run sovereign/frontend/app.py --server.port 8501
+```
+
+Open `http://localhost:8501` in your browser.
+
+---
+
+## YAML Agent Registry
+
+Add, remove, or replace agents by editing YAML files in `sovereign/agents/`. Zero Python code changes required.
+
+### Agent YAML Schema
+
+```yaml
+name: "Data Processor"
+description: "Process structured data (Excel, CSV, JSON)"
+category: "data_processing"
+version: "1.0.0"
+enabled: true
+icon: "📊"
+
+supported_file_types:
+  - ".xlsx"
+  - ".csv"
+  - ".json"
+
+requires_vision: false
+sandbox_image: "sandbox-python:latest"
+model: "Qwen Coder 7B"  # optional — uses default if omitted
+
+system_prompt: |
+  You are a Python data-processing agent...
+
+security:
+  blocked_imports: ["socket", "urllib", "requests"]
+  blocked_patterns: ["eval(", "exec("]
+  max_code_lines: 300
+```
+
+### Adding a New Agent
+
+1. Create a new `.yaml` file in `sovereign/agents/`
+2. Restart the orchestrator — agent appears in `--list-agents`
+
+### Replacing an Agent
+
+1. Edit the existing `.yaml` file
+2. Restart — changes take effect
+
+### Disabling an Agent
+
+Set `enabled: false` in the YAML file.
+
+---
+
+## YAML Model Registry
+
+Add, remove, or replace LLM models by editing YAML files in `sovereign/models/`. Zero code changes required.
+
+### Model YAML Schema
+
+```yaml
+name: "Qwen Coder 7B"
+id: "Qwen2.5-coder-7B-Instruct-AWQ"
+description: "Fast code generation for data/document processing"
+base_url: "http://192.168.1.5:8000/v1"
+api_key: "not-needed"
+capabilities:
+  - code_generation
+  - text_generation
+requires_vision: false
+default: true
+```
+
+### Adding a New Model
+
+1. Create a new `.yaml` file in `sovereign/models/`
+2. Restart — model appears in `--list-models`
+
+Or use the Model Registry agent to add it automatically:
+
+```bash
+python orchestrator.py \
+    --agent "Model Registry" \
+    --prompt "Add Qwen3-coder-8B, endpoint http://192.168.1.5:8000/v1, make it default"
 ```
 
 ---
 
-## Step 4: Running the Orchestrator
+## Security Scanner
 
-### Basic Usage
+Every generated code block is scanned before execution:
 
-```bash
-python orchestrator.py \
-    --prompt "Read vendor_list.xlsx and add a 5% tax to the pricing column" \
-    --file "/Users/you/Documents/vendor_list.xlsx"
-```
-
-The script will:
-1. Validate the file exists
-2. Ask the LLM to generate processing code
-3. Display the generated code for your review
-4. Ask for confirmation before executing
-5. Run the code in an isolated container
-6. Report success or failure
-
-### Auto Mode (Skip Confirmation)
-
-```bash
-python orchestrator.py --auto \
-    --prompt "Sort the spreadsheet by price descending" \
-    --file "./data.xlsx"
-```
-
-### More Examples
-
-```bash
-# Merge two sheets
-python orchestrator.py \
-    --prompt "Merge 'Sheet1' and 'Sheet2' on column 'ID', save to 'merged.xlsx'" \
-    --file "./workbook.xlsx"
-
-# Process a Word document
-python orchestrator.py \
-    --prompt "Extract all headings and bullet points, save as 'outline.txt'" \
-    --file "./report.docx"
-
-# Clean CSV data
-python orchestrator.py \
-    --prompt "Remove duplicate rows, fill missing values with 'N/A', save back" \
-    --file "./customers.csv"
-```
-
----
-
-## Security Model
-
-| Layer | Mechanism |
+| Layer | What it catches |
 |---|---|
-| Network isolation | `network_disabled=True` — containers cannot reach WLAN or internet |
-| Filesystem isolation | Only the target file's parent directory is mounted |
-| Resource limits | 512 MB RAM, 50% CPU, configurable timeout |
-| Ephemeral execution | Container auto-removes after each run |
-| No secrets in transit | `api_key` is a dummy string; vLLM does not require authentication |
+| **AST scan** | Dangerous imports (`socket`, `subprocess`, `ctypes`), dangerous calls (`eval`, `exec`, `compile`) |
+| **Regex scan** | Hardcoded secrets (API keys, tokens, passwords), environment access (`os.environ`), path traversal (`../`) |
+| **Agent-specific** | Each agent YAML can add extra `blocked_imports` and `blocked_patterns` |
 
-The generated code **cannot** exfiltrate data, download dependencies, or access the network.
+Critical issues block execution and loop back to the LLM with feedback. Warnings are displayed but don't block.
+
+---
+
+## Configuration Reference
+
+| Variable | Default | Description |
+|---|---|---|
+| `SANDBOX_IMAGE` | `sandbox-python:latest` | Docker image for code execution |
+| `SANDBOX_TIMEOUT` | `60` | Max seconds for sandbox execution |
+| `SANDBOX_MEM_LIMIT` | `512m` | Max RAM for the container |
+| `MAX_EXTRACT_RETRIES` | `3` | Max code extraction retry attempts |
+| `MAX_SANDBOX_RETRIES` | `2` | Max sandbox execution retry attempts |
+| `MAX_SECURITY_RETRIES` | `2` | Max security scan retry attempts |
+| `FRONTEND_PORT` | `8501` | Streamlit frontend port |
+
+---
+
+## Tech Stack
+
+| Component | Library | Purpose |
+|---|---|---|
+| Graph orchestration | [LangGraph](https://github.com/langchain-ai/langgraph) | Stateful graph with nodes, conditional edges, retry loops |
+| LLM integration | [LangChain](https://github.com/langchain-ai/langchain) + [langchain-openai](https://github.com/langchain-ai/langchain/tree/master/libs/partners/openai) | `ChatOpenAI` pointed at vLLM's OpenAI-compatible API |
+| State management | `TypedDict` + `add_messages` reducer | Type-safe state with auto-merging message history |
+| Security | AST + Regex scanner | Two-layer code analysis before execution |
+| Configuration | PyYAML + `python-dotenv` | YAML agent/model configs, `.env` for runtime settings |
+| Frontend | [Streamlit](https://streamlit.io) | Multi-page dashboard for agent selection, code review, security |
+| Sandbox | Docker SDK for Python | Isolated, network-disabled code execution |
 
 ---
 
@@ -225,46 +294,24 @@ The generated code **cannot** exfiltrate data, download dependencies, or access 
 - Open Docker Desktop and wait for it to fully start
 - Check the Docker whale icon is in your menu bar
 
-### "Could not reach vLLM after 3 attempts"
+### "Could not reach vLLM"
 - Verify Node 1 is powered on and running vLLM
 - Check that both machines are on the same ad-hoc network
 - Run `ping 192.168.1.5` from Node 2 to confirm connectivity
-- Verify vLLM is listening on `0.0.0.0:8000` (not just `127.0.0.1`)
 
-### "Sandbox execution failed"
-- Check the stderr output — it usually shows the Python error
-- Make sure the file format matches what the LLM expects (e.g. `.xlsx` for Excel)
-- Try running with a simpler prompt to debug
+### "Agent not found"
+- Run `python orchestrator.py --list-agents` to see available agents
+- Check the agent name matches exactly (case-insensitive)
 
-### "Could not extract valid Python code"
-- The LLM may have returned conversational text instead of code
-- Try rephrasing your prompt to be more explicit: "Write Python code that..."
+### "Model not found"
+- Run `python orchestrator.py --list-models` to see registered models
+- Check `sovereign/models/` directory for YAML files
+
+### Security scan blocks my code
+- Review the security issues in the scan output
+- The LLM will be asked to regenerate code avoiding the flagged patterns
+- Adjust `blocked_imports` / `blocked_patterns` in the agent YAML if needed
 
 ### Sandbox timeout
 - Increase `SANDBOX_TIMEOUT` in `.env` (default: 60 seconds)
 - For large files, the LLM-generated code may need more processing time
-
----
-
-## Configuration Reference
-
-| Variable | Default | Description |
-|---|---|---|
-| `VLLM_BASE_URL` | `http://192.168.1.5:8000/v1` | Full URL to vLLM's OpenAI-compatible endpoint |
-| `VLLM_MODEL` | `Qwen2.5-coder-7B-Instruct-AWQ` | Model identifier (must match vLLM's --model) |
-| `SANDBOX_IMAGE` | `sandbox-python:latest` | Docker image for code execution |
-| `SANDBOX_TIMEOUT` | `60` | Max seconds for sandbox execution |
-| `SANDBOX_MEM_LIMIT` | `512m` | Max RAM for the container |
-
----
-
-## Project Structure
-
-```
-Sovereign AI/
-├── orchestrator.py          # Main application — run this
-├── Dockerfile.sandbox       # Docker image for isolated code execution
-├── requirements.txt         # Python dependencies
-├── .env.example             # Configuration template (copy to .env)
-└── README.md                # This file
-```
