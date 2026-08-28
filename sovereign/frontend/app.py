@@ -4,12 +4,13 @@ Run with:
     streamlit run sovereign/frontend/app.py --server.port 8501
 
 Multi-page dashboard for agent selection, file upload, code review,
-security scanning, and execution logs.
+security scanning, execution results, and file download.
 """
 
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from sovereign.agents import AgentRegistry
 from sovereign.models import ModelRegistry
 from sovereign.security.scanner import scan_code
 from sovereign.vision import is_image_file
+from sovereign import sanitize_ssl_env
 
 # ────────────────────────────────────────────────────────────
 # PAGE CONFIG
@@ -32,6 +34,8 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+TMP_ROOT = Path(__file__).parent.parent.parent / "sovereign_frontend_tmp"
 
 # ────────────────────────────────────────────────────────────
 # INIT REGISTRIES
@@ -45,6 +49,12 @@ def load_registries():
 
 agent_registry, model_registry = load_registries()
 
+
+@st.cache_data(ttl=30)
+def query_server_cached(base_url: str) -> list[str]:
+    """Cache /v1/models queries to avoid hammering vLLM on every rerun."""
+    return ModelRegistry.query_server(base_url)
+
 # ────────────────────────────────────────────────────────────
 # SESSION STATE
 # ────────────────────────────────────────────────────────────
@@ -56,6 +66,12 @@ if "execution_result" not in st.session_state:
     st.session_state.execution_result = None
 if "history" not in st.session_state:
     st.session_state.history = []
+if "workspace_files" not in st.session_state:
+    st.session_state.workspace_files = {}   # original filename -> tmp path
+if "last_upload_name" not in st.session_state:
+    st.session_state.last_upload_name = None
+if "last_processed_file" not in st.session_state:
+    st.session_state.last_processed_file = ""
 
 # ────────────────────────────────────────────────────────────
 # SIDEBAR
@@ -86,7 +102,7 @@ with st.sidebar:
 
     st.divider()
 
-    # Model info
+    # Model info + reachability
     st.subheader("Model")
     default_model = model_registry.get_default()
     if default_model:
@@ -94,12 +110,24 @@ with st.sidebar:
         st.caption(default_model.id)
         st.caption(f"Endpoint: {default_model.base_url}")
 
+        served = query_server_cached(default_model.base_url)
+        if served:
+            if default_model.id not in served:
+                best = model_registry.best_match(served, default_model.id)
+                st.warning(f"Serving: {', '.join(served[:3])}")
+                if best:
+                    st.info(f"Will match to: '{best}'")
+            else:
+                st.success("Endpoint reachable, model ready")
+        else:
+            st.warning("⚠️ Endpoint unreachable — check Node 1")
+
     st.divider()
 
     # Settings
     st.subheader("Settings")
-    auto_mode = st.checkbox("Auto-execute (skip confirmation)", value=False)
     sandbox_timeout = st.slider("Sandbox timeout (s)", 10, 300, 60)
+    st.caption("Code runs automatically in an isolated sandbox. Review results below.")
 
 # ────────────────────────────────────────────────────────────
 # MAIN CONTENT — TABS
@@ -114,7 +142,6 @@ tab_work, tab_code, tab_security, tab_models, tab_history = st.tabs(
 with tab_work:
     st.header(f"{selected_agent.icon} {selected_agent.name}")
 
-    # File upload
     col1, col2 = st.columns([2, 1])
 
     with col1:
@@ -124,18 +151,36 @@ with tab_work:
             if selected_agent.supported_file_types
             else None,
             help=f"Supported: {', '.join(selected_agent.supported_file_types)}",
+            key="file_uploader",
         )
 
     with col2:
-        # Image upload for vision agents
         if selected_agent.requires_vision:
             image_file = st.file_uploader(
                 "Upload image",
                 type=["png", "jpg", "jpeg", "bmp", "tiff", "webp"],
                 help="Image to analyze",
+                key="image_uploader",
             )
         else:
             image_file = None
+
+    if st.session_state.workspace_files:
+        st.caption(
+            f"Workspace: {', '.join(st.session_state.workspace_files.keys())} "
+            "(edits persist across prompts)"
+        )
+        if st.button("🔄 Reset workspace (re-upload originals)"):
+            for p in st.session_state.workspace_files.values():
+                try:
+                    Path(p).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            st.session_state.workspace_files = {}
+            st.session_state.last_upload_name = None
+            st.session_state.generated_code = ""
+            st.session_state.execution_result = None
+            st.rerun()
 
     # Prompt
     user_prompt = st.text_area(
@@ -152,34 +197,41 @@ with tab_work:
             st.error("Please enter a prompt.")
         else:
             with st.spinner("Generating code with LLM..."):
-                # Save uploaded file temporarily
-                if uploaded_file:
-                    tmp_dir = Path("sovereign_frontend_tmp")
-                    tmp_dir.mkdir(exist_ok=True)
-                    tmp_path = tmp_dir / uploaded_file.name
-                    tmp_path.write_bytes(uploaded_file.read())
-                    file_path = str(tmp_path)
-                else:
-                    file_path = ""
+                # ── Stage files in a persistent workspace ──
+                TMP_ROOT.mkdir(parents=True, exist_ok=True)
+                file_path = ""
 
-                # Save image if present
+                if uploaded_file and not selected_agent.is_registry_agent:
+                    fname = uploaded_file.name
+                    if st.session_state.last_upload_name != fname:
+                        # New upload → save original bytes
+                        tmp_path = TMP_ROOT / fname
+                        tmp_path.write_bytes(uploaded_file.read())
+                        st.session_state.workspace_files[fname] = str(tmp_path)
+                        st.session_state.last_upload_name = fname
+                    else:
+                        # Same file already in workspace → keep prior edits
+                        tmp_path = Path(
+                            st.session_state.workspace_files.get(fname, TMP_ROOT / fname)
+                        )
+                    file_path = str(tmp_path)
+
+                # Image upload (regardless of workspace persistence)
                 image_path = ""
                 if image_file:
-                    img_dir = Path("sovereign_frontend_tmp")
-                    img_dir.mkdir(exist_ok=True)
-                    img_path = img_dir / image_file.name
+                    img_path = TMP_ROOT / image_file.name
                     img_path.write_bytes(image_file.read())
                     image_path = str(img_path)
 
-                # Build and run graph
+                # ── Build and run graph ──────────────────────
                 from dotenv import load_dotenv
                 load_dotenv()
+                sanitize_ssl_env()
 
                 from langchain_openai import ChatOpenAI
                 from sovereign.graph import app
                 from sovereign.nodes import ContextSchema
 
-                # Resolve model
                 model_config = None
                 if selected_agent.model:
                     model_config = model_registry.get_model(selected_agent.model)
@@ -189,12 +241,28 @@ with tab_work:
                 if not model_config:
                     st.error("No model available. Check sovereign/models/ directory.")
                 else:
+                    # Auto-match model ID against what the server actually serves
+                    served = query_server_cached(model_config.base_url)
+                    if served:
+                        best = model_registry.best_match(served, model_config.id)
+                        if best and best != model_config.id:
+                            st.warning(
+                                f"Model '{model_config.id}' not found on server; "
+                                f"using '{best}'."
+                            )
+                            model_config.id = best
+                        elif not best:
+                            st.error(
+                                f"Model '{model_config.id}' is not served. "
+                                f"Server has: {', '.join(served)}"
+                            )
+
                     llm = ChatOpenAI(
                         model=model_config.id,
                         base_url=model_config.base_url,
                         api_key=model_config.api_key,
-                        temperature=0.1,
-                        max_tokens=4096,
+                        temperature=model_config.temperature,
+                        max_tokens=model_config.max_tokens,
                         timeout=120,
                     )
 
@@ -209,7 +277,7 @@ with tab_work:
 
                     initial_state = {
                         "user_prompt": user_prompt,
-                        "auto": True,  # Frontend always auto (we show code for review)
+                        "auto": True,  # frontend executes in sandbox automatically
                         "extract_attempts": 0,
                         "sandbox_attempts": 0,
                         "security_attempts": 0,
@@ -226,8 +294,8 @@ with tab_work:
                         st.session_state.generated_code = result.get("code", "")
                         st.session_state.security_result = result.get("security_result")
                         st.session_state.execution_result = result.get("sandbox_result")
+                        st.session_state.last_processed_file = file_path
 
-                        # Add to history
                         st.session_state.history.append({
                             "agent": selected_agent.name,
                             "prompt": user_prompt,
@@ -235,9 +303,64 @@ with tab_work:
                             "success": result.get("sandbox_result", {}).get("exit_code", -1) == 0,
                         })
 
-                        st.success("Generation complete! Check the Code Review tab.")
+                        st.rerun()
                     except Exception as exc:
                         st.error(f"Error: {exc}")
+
+    # ── Execution results panel (rendered on every rerun) ──
+    with st.container(border=True):
+        st.subheader("📊 Execution Result")
+
+        exec_result = st.session_state.execution_result
+        if exec_result is None:
+            st.caption("Nothing run yet — upload a file, enter a prompt, and hit Generate.")
+        else:
+            exit_code = exec_result.get("exit_code", -1)
+            stdout = exec_result.get("stdout", "")
+            stderr = exec_result.get("stderr", "")
+
+            if exit_code == 0:
+                st.success(f"✅ Execution succeeded — file modified in the sandbox.")
+            else:
+                st.error(f"❌ Execution failed (exit code {exit_code}).")
+
+            if stdout:
+                st.markdown("**Sandbox output:**")
+                st.code(stdout)
+            if stderr:
+                st.markdown("**Errors:**")
+                st.code(stderr, language="bash")
+            if not stdout and not stderr:
+                st.caption("No output produced.")
+
+            # Download / save the modified file
+            processed = st.session_state.last_processed_file
+            if processed and Path(processed).exists() and Path(processed).is_file():
+                size = Path(processed).stat().st_size
+                st.caption(f"Modified file: `{processed}` ({size:,} bytes)")
+
+                with open(processed, "rb") as fh:
+                    st.download_button(
+                        "📥 Download modified file",
+                        data=fh.read(),
+                        file_name=Path(processed).name,
+                        mime="application/octet-stream",
+                        use_container_width=True,
+                    )
+
+                save_dir = st.text_input(
+                    "Optional: save a copy to a folder on Node 2 (server path)",
+                    placeholder="e.g. C:/Users/you/Desktop",
+                )
+                if st.button("💾 Save copy to folder", use_container_width=True) and save_dir:
+                    target = Path(save_dir)
+                    try:
+                        target.mkdir(parents=True, exist_ok=True)
+                        dest = target / Path(processed).name
+                        shutil.copy(processed, dest)
+                        st.success(f"Saved to {dest}")
+                    except OSError as exc:
+                        st.error(f"Could not save: {exc}")
 
 # ────────────────────────────────────────────────────────────
 # TAB: CODE REVIEW
@@ -256,6 +379,7 @@ with tab_code:
         with col2:
             if st.button("🔄 Re-generate"):
                 st.session_state.generated_code = ""
+                st.session_state.execution_result = None
                 st.rerun()
     else:
         st.info("No code generated yet. Use the Work tab to generate code.")
@@ -311,6 +435,17 @@ with tab_models:
                 st.write(f"**Capabilities:** {', '.join(model.capabilities)}")
                 st.write(f"**Vision:** {'Yes' if model.requires_vision else 'No'}")
                 st.write(f"**Default:** {'Yes' if model.default else 'No'}")
+                st.write(f"**Max tokens:** {model.max_tokens}")
+                st.write(f"**Temperature:** {model.temperature}")
+
+                served = query_server_cached(model.base_url)
+                if served:
+                    st.write(f"**Serving on server:** {', '.join(served)}")
+                    if model.id not in served:
+                        best = model_registry.best_match(served, model.id)
+                        st.warning(f"'id' mismatch — server match: {best}")
+                else:
+                    st.warning("Endpoint unreachable")
     else:
         st.warning("No models registered. Add YAML files to sovereign/models/.")
 
@@ -321,7 +456,7 @@ with tab_models:
         with col1:
             new_name = st.text_input("Model Name")
             new_id = st.text_input("Model ID (HuggingFace or local)")
-            new_base_url = st.text_input("Base URL", value="http://192.168.1.5:8000/v1")
+            new_base_url = st.text_input("Base URL", value="http://192.168.0.116:8000/v1")
         with col2:
             new_desc = st.text_input("Description")
             new_capabilities = st.multiselect(
@@ -331,6 +466,7 @@ with tab_models:
             )
             new_vision = st.checkbox("Requires Vision")
             new_default = st.checkbox("Set as Default")
+            new_max_tokens = st.number_input("Max tokens", min_value=128, value=2048)
 
         submitted = st.form_submit_button("Add Model")
         if submitted and new_name and new_id:
@@ -344,6 +480,9 @@ with tab_models:
                 "capabilities": new_capabilities,
                 "requires_vision": new_vision,
                 "default": new_default,
+                "max_tokens": int(new_max_tokens),
+                "temperature": 0.1,
+                "max_model_len": 4096,
             }
             slug = "".join(c if c.isalnum() else "-" for c in new_name.lower()).strip("-")
             filepath = Path(__file__).parent.parent / "models" / f"{slug}.yaml"

@@ -18,10 +18,12 @@ from langchain_openai import ChatOpenAI
 
 from .graph import app
 from .nodes import ContextSchema
+from . import sanitize_ssl_env
 
 
 def main() -> None:
     load_dotenv()
+    sanitize_ssl_env()
 
     # ── Configuration from env ─────────────────────────────
     sandbox_image: str = os.getenv(
@@ -144,6 +146,33 @@ def main() -> None:
         print("[ERROR] No models registered. Add a model YAML to sovereign/models/", file=sys.stderr)
         sys.exit(1)
 
+    # ── Verify endpoint & validate model ID ─────────────────
+    served = model_registry.query_server(model_config.base_url)
+    if not served:
+        print(
+            f"[WARN] Could not reach {model_config.base_url}\n"
+            f"       Check Node 1 is up and the base_url in the model YAML is correct.",
+            file=sys.stderr,
+        )
+    else:
+        best = model_registry.best_match(served, model_config.id)
+        if best and best != model_config.id:
+            print(
+                f"  Model ID '{model_config.id}' not found on server.\n"
+                f"  Server serves: {', '.join(served)}\n"
+                f"  Using best match: {best}",
+                file=sys.stderr,
+            )
+            model_config.id = best
+        elif not best:
+            print(
+                f"[WARN] Model '{model_config.id}' not found on server.\n"
+                f"       Server serves: {', '.join(served)}\n"
+                f"       Update the 'id' field in the model YAML, or pass "
+                f"--served-model-name to vLLM.",
+                file=sys.stderr,
+            )
+
     # ── Validate file arg ──────────────────────────────────
     if not args.file and not agent_config.is_registry_agent:
         parser.error("--file is required for non-registry agents")
@@ -170,8 +199,8 @@ def main() -> None:
         model=model_config.id,
         base_url=model_config.base_url,
         api_key=model_config.api_key,
-        temperature=0.1,
-        max_tokens=4096,
+        temperature=model_config.temperature,
+        max_tokens=model_config.max_tokens,
         timeout=120,
     )
 

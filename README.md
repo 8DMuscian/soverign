@@ -126,6 +126,29 @@ Model and agent configuration is now in YAML files:
 docker build -t sandbox-python -f Dockerfile.sandbox .
 ```
 
+### 3b. Start vLLM (WSL on this box)
+
+The coder model is served from the `Ubuntu` WSL distro on this machine using a
+venv named `vllm-env`. Launch it (stays in the foreground):
+
+```bash
+wsl
+source ~/vllm-env/bin/activate
+VLLM_USE_FLASHINFER_SAMPLER=0 VLLM_WSL2_ENABLE_PIN_MEMORY=1 vllm serve \
+    Qwen/Qwen2.5-Coder-3B-Instruct-AWQ \
+    --quantization awq \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --max-model-len 4096 \
+    --gpu-memory-utilization 0.8 \
+    --enforce-eager
+```
+
+Verify from Windows: `curl http://localhost:8000/v1/models` should list
+`Qwen/Qwen2.5-Coder-3B-Instruct-AWQ`. (The orchestrator and frontend call vLLM
+via `localhost`; if you ever move vLLM to another machine, change `base_url` in
+`sovereign/models/*.yaml`.)
+
 ### 4. Run the Orchestrator
 
 ```bash
@@ -151,7 +174,7 @@ python orchestrator.py \
 # Register a new model (no code changes needed)
 python orchestrator.py \
     --agent "Model Registry" \
-    --prompt "Add Qwen3-coder-8B, endpoint http://192.168.1.5:8000/v1, make it default"
+    --prompt "Add Qwen3-coder-8B, endpoint http://192.168.0.116:8000/v1, make it default"
 ```
 
 ### 5. Run the Frontend
@@ -161,6 +184,17 @@ streamlit run sovereign/frontend/app.py --server.port 8501
 ```
 
 Open `http://localhost:8501` in your browser.
+
+The Work tab runs the full pipeline. After generating you get:
+
+- **Execution Result panel** — status banner (success/failure + exit code), sandbox
+  stdout, and errors
+- **Download modified file** — get the processed file straight from the browser
+- **Save copy to folder** — optionally write the result to a real folder on Node 2
+  (e.g. your data directory) so you can open it in Excel
+- **Persistent workspace** — uploads are staged in `sovereign_frontend_tmp/`; each
+  new prompt keeps editing the *already-modified* copy, so multi-step edits work
+  like the CLI (use **Reset workspace** to upload fresh originals)
 
 ---
 
@@ -185,7 +219,7 @@ supported_file_types:
 
 requires_vision: false
 sandbox_image: "sandbox-python:latest"
-model: "Qwen Coder 7B"  # optional — uses default if omitted
+model: "Qwen Coder 3B"  # optional — uses default if omitted
 
 system_prompt: |
   You are a Python data-processing agent...
@@ -219,17 +253,25 @@ Add, remove, or replace LLM models by editing YAML files in `sovereign/models/`.
 ### Model YAML Schema
 
 ```yaml
-name: "Qwen Coder 7B"
-id: "Qwen2.5-coder-7B-Instruct-AWQ"
+name: "Qwen Coder 3B"
+id: "Qwen/Qwen2.5-Coder-3B-Instruct-AWQ" # must match what vLLM serves
 description: "Fast code generation for data/document processing"
-base_url: "http://192.168.1.5:8000/v1"
+base_url: "http://localhost:8000/v1" # vLLM endpoint (runs in WSL on this box)
 api_key: "not-needed"
 capabilities:
   - code_generation
   - text_generation
 requires_vision: false
 default: true
+max_tokens: 2048                        # per-model generation headroom
+temperature: 0.1
+max_model_len: 4096                     # align with vLLM --max-model-len
 ```
+
+> **Auto-matching:** on startup the system queries `/v1/models` on the configured
+> `base_url`. If the `id` doesn't match exactly, it auto-resolves to the closest
+> served model (e.g. a short id matching `Qwen/Qwen2.5-Coder-3B-Instruct-AWQ`)
+> and warns you. Keeping the full repo path (`Qwen/...`) as `id` is safest.
 
 ### Adding a New Model
 
@@ -241,7 +283,7 @@ Or use the Model Registry agent to add it automatically:
 ```bash
 python orchestrator.py \
     --agent "Model Registry" \
-    --prompt "Add Qwen3-coder-8B, endpoint http://192.168.1.5:8000/v1, make it default"
+    --prompt "Add Qwen3-coder-8B, endpoint http://192.168.0.116:8000/v1, make it default"
 ```
 
 ---
@@ -297,7 +339,19 @@ Critical issues block execution and loop back to the LLM with feedback. Warnings
 ### "Could not reach vLLM"
 - Verify Node 1 is powered on and running vLLM
 - Check that both machines are on the same ad-hoc network
-- Run `ping 192.168.1.5` from Node 2 to confirm connectivity
+- Run the vLLM WSL command in section 3b, then verify with
+  `curl http://localhost:8000/v1/models`
+
+### "Model X does not exist (404 from vLLM)"
+- The `id` in the model YAML does not match what vLLM serves
+- Confirm with `curl http://localhost:8000/v1/models` and set the `id` to the
+  exact served name (this repo uses the full repo path `Qwen/...`)
+- Since v3.0 the system auto-matches to the closest served name and warns you
+
+### "FileNotFoundError / SSL_CERT_FILE on startup"
+- A broken `SSL_CERT_FILE` or `CURL_CA_BUNDLE` env var crashes httpx
+- The system now sanitizes broken pointers automatically; unset them if the
+  warning persists
 
 ### "Agent not found"
 - Run `python orchestrator.py --list-agents` to see available agents

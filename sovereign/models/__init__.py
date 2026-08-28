@@ -9,13 +9,15 @@ Usage::
 
     registry = ModelRegistry()          # auto-discovers models/*.yaml
     registry.list_models()              # -> [ModelConfig, ...]
-    registry.get_model("Qwen Coder 7B") # -> ModelConfig
+    registry.get_model("Qwen Coder 3B") # -> ModelConfig
     registry.get_default()              # -> ModelConfig (default=True)
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -39,6 +41,9 @@ class ModelConfig:
     capabilities: list[str] = field(default_factory=lambda: ["code_generation"])
     requires_vision: bool = False
     default: bool = False
+    max_tokens: int = 2048
+    temperature: float = 0.1
+    max_model_len: int = 4096
 
     # ── helpers ──────────────────────────────────────────────
 
@@ -108,6 +113,57 @@ class ModelRegistry:
             lines.append(f"  - {m.name}{tag}{vision}: {m.description}")
         return "\n".join(lines)
 
+    # ── endpoint verification ────────────────────────────────
+
+    @staticmethod
+    def query_server(base_url: str, timeout: float = 5.0) -> list[str]:
+        """Query a vLLM OpenAI-compatible server's ``/v1/models`` endpoint.
+
+        Returns the list of served model IDs (empty on failure).
+        Never raises — returns ``[]`` if the server is unreachable.
+        """
+        url = base_url.rstrip("/")
+        if url.endswith("/v1"):
+            url = url + "/models"
+        else:
+            url = url + "/v1/models"
+
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            return [m.get("id", "") for m in data.get("data", []) if m.get("id")]
+        except Exception as exc:
+            logger.debug("Could not query %s: %s", url, exc)
+            return []
+
+    @staticmethod
+    def check_model(models: list[str], expected: str) -> bool:
+        """True if *expected* is present (exact) among served model IDs."""
+        return expected in models
+
+    @staticmethod
+    def best_match(models: list[str], expected: str) -> Optional[str]:
+        """Return the best served model ID for *expected*.
+
+        Exact match wins; otherwise a case-insensitive / short-name /
+        tail match on repo-style names (e.g. ``Qwen/Qwen2.5-Coder-3B``).
+        """
+        if expected in models:
+            return expected
+
+        exp_lower = expected.lower()
+        for m in models:
+            if m.lower() == exp_lower:
+                return m
+
+        # Match the last path segment (repo tail) case-insensitively
+        tail = expected.split("/")[-1].lower()
+        for m in models:
+            if m.split("/")[-1].lower() == tail:
+                return m
+
+        return None
+
     # ── reload (for hot-reload after YAML changes) ──────────
 
     def reload(self) -> None:
@@ -158,4 +214,7 @@ class ModelRegistry:
             capabilities=list(data.get("capabilities", ["code_generation"])),
             requires_vision=bool(data.get("requires_vision", False)),
             default=bool(data.get("default", False)),
+            max_tokens=int(data.get("max_tokens", 2048)),
+            temperature=float(data.get("temperature", 0.1)),
+            max_model_len=int(data.get("max_model_len", 4096)),
         )

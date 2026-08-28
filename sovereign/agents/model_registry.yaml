@@ -25,6 +25,9 @@ system_prompt: |
       capabilities: list of [code_generation, vision, image_understanding, text_generation]
       requires_vision: true/false
       default: true/false
+      max_tokens: max output tokens per generation (default 2048)
+      temperature: sampling temperature (default 0.1)
+      max_model_len: align with vLLM --max-model-len (default 4096)
 
   REPLACE MODEL:
     Delete the old YAML file, create a new one with updated values.

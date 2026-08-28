@@ -327,15 +327,10 @@ def run_sandbox(
             if exc.stderr
             else ""
         )
-        stdout_out = (
-            exc.stdout.decode("utf-8", errors="replace")
-            if exc.stdout
-            else ""
-        )
         return {
             "sandbox_attempts": attempt,
             "sandbox_result": {
-                "stdout": stdout_out,
+                "stdout": "",
                 "stderr": stderr_out or str(exc),
                 "exit_code": exc.exit_status,
             },

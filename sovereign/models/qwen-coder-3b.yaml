@@ -1,10 +1,13 @@
-name: "Qwen Coder 7B"
-id: "Qwen2.5-coder-7B-Instruct-AWQ"
+name: "Qwen Coder 3B"
+id: "Qwen/Qwen2.5-Coder-3B-Instruct-AWQ"
 description: "Fast code generation for data/document processing tasks"
-base_url: "http://192.168.1.5:8000/v1"
+base_url: "http://localhost:8000/v1"
 api_key: "not-needed"
 capabilities:
   - code_generation
   - text_generation
 requires_vision: false
 default: true
+max_tokens: 2048
+temperature: 0.1
+max_model_len: 4096
