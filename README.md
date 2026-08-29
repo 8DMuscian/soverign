@@ -120,13 +120,28 @@ Model and agent configuration is now in YAML files:
 - **Models:** `sovereign/models/*.yaml`
 - **Agents:** `sovereign/agents/*.yaml`
 
+### 2b. On the orchestration device (Node 2)
+
+The orchestrator + frontend + sandbox run here — separate from Node 1 (vLLM).
+Each box needs its own copy of the repo, Python deps, and Docker image:
+
+```bash
+git pull                       # get the latest sovereign code
+pip install -r requirements.txt
+docker build -t sandbox-python -f Dockerfile.sandbox .   # must be rebuilt per machine
+```
+
+The model YAML's `base_url` points at the ngrok tunnel
+(`https://<subdomain>.ngrok-free.dev/v1`) so Node 2 reaches Node 1's vLLM over
+HTTPS without LAN routing concerns.
+
 ### 3. Build Sandbox Docker Image
 
 ```bash
 docker build -t sandbox-python -f Dockerfile.sandbox .
 ```
 
-### 3b. Start vLLM (WSL on this box)
+### 3b. Start vLLM + expose it with ngrok
 
 The coder model is served from the `Ubuntu` WSL distro on this machine using a
 venv named `vllm-env`. Launch it (stays in the foreground):
@@ -144,10 +159,28 @@ VLLM_USE_FLASHINFER_SAMPLER=0 VLLM_WSL2_ENABLE_PIN_MEMORY=1 vllm serve \
     --enforce-eager
 ```
 
-Verify from Windows: `curl http://localhost:8000/v1/models` should list
-`Qwen/Qwen2.5-Coder-3B-Instruct-AWQ`. (The orchestrator and frontend call vLLM
-via `localhost`; if you ever move vLLM to another machine, change `base_url` in
-`sovereign/models/*.yaml`.)
+The orchestration device (Node 2) is on a separate ad-hoc network, so vLLM is
+tunneled out via ngrok instead of relying on LAN routing:
+
+```bash
+# in a separate WSL/terminal on Node 1
+ngrok http 8000
+# note the *.ngrok-free.dev URL assigned, then set `base_url` in
+# sovereign/models/qwen-coder-3b.yaml to https://<subdomain>.ngrok-free.dev/v1
+```
+
+Verify with:
+
+```bash
+curl -H "Ngrok-Skip-Browser-Warning: true" \
+    https://scheming-blazer-silt.ngrok-free.dev/v1/models
+```
+
+> The client (CLI + frontend) automatically sends the
+> `Ngrok-Skip-Browser-Warning` header — free-tier ngrok tunnels otherwise serve
+> an HTML interstitial instead of JSON. Free ngrok subdomains rotate when the
+> tunnel restarts; update the model YAML after a restart. The startup endpoint
+> check will warn you if `base_url` is stale.
 
 ### 4. Run the Orchestrator
 
@@ -174,7 +207,7 @@ python orchestrator.py \
 # Register a new model (no code changes needed)
 python orchestrator.py \
     --agent "Model Registry" \
-    --prompt "Add Qwen3-coder-8B, endpoint http://192.168.0.116:8000/v1, make it default"
+    --prompt "Add Qwen3-coder-8B, endpoint https://scheming-blazer-silt.ngrok-free.dev/v1, make it default"
 ```
 
 ### 5. Run the Frontend
@@ -256,7 +289,7 @@ Add, remove, or replace LLM models by editing YAML files in `sovereign/models/`.
 name: "Qwen Coder 3B"
 id: "Qwen/Qwen2.5-Coder-3B-Instruct-AWQ" # must match what vLLM serves
 description: "Fast code generation for data/document processing"
-base_url: "http://localhost:8000/v1" # vLLM endpoint (runs in WSL on this box)
+base_url: "https://scheming-blazer-silt.ngrok-free.dev/v1"
 api_key: "not-needed"
 capabilities:
   - code_generation
@@ -283,7 +316,7 @@ Or use the Model Registry agent to add it automatically:
 ```bash
 python orchestrator.py \
     --agent "Model Registry" \
-    --prompt "Add Qwen3-coder-8B, endpoint http://192.168.0.116:8000/v1, make it default"
+    --prompt "Add Qwen3-coder-8B, endpoint https://scheming-blazer-silt.ngrok-free.dev/v1, make it default"
 ```
 
 ---
@@ -337,15 +370,15 @@ Critical issues block execution and loop back to the LLM with feedback. Warnings
 - Check the Docker whale icon is in your menu bar
 
 ### "Could not reach vLLM"
-- Verify Node 1 is powered on and running vLLM
-- Check that both machines are on the same ad-hoc network
-- Run the vLLM WSL command in section 3b, then verify with
-  `curl http://localhost:8000/v1/models`
+- Verify Node 1 is powered on, running vLLM, and the ngrok tunnel is up
+- From Node 2: `curl -H "Ngrok-Skip-Browser-Warning: true"
+  https://scheming-blazer-silt.ngrok-free.dev/v1/models`
+- If the ngrok subdomain rotated, update `base_url` in `sovereign/models/*.yaml`
 
 ### "Model X does not exist (404 from vLLM)"
 - The `id` in the model YAML does not match what vLLM serves
-- Confirm with `curl http://localhost:8000/v1/models` and set the `id` to the
-  exact served name (this repo uses the full repo path `Qwen/...`)
+- Confirm via the curl above and set the `id` to the exact served name
+  (this repo uses the full repo path `Qwen/...`)
 - Since v3.0 the system auto-matches to the closest served name and warns you
 
 ### "FileNotFoundError / SSL_CERT_FILE on startup"
@@ -360,6 +393,15 @@ Critical issues block execution and loop back to the LLM with feedback. Warnings
 ### "Model not found"
 - Run `python orchestrator.py --list-models` to see registered models
 - Check `sovereign/models/` directory for YAML files
+
+### Sandbox script exits with status 1
+- Older builds reported `...returned non-zero exit status 1: b''` (the real
+  traceback was discarded by docker auto-remove). v3.0.1 captures stdout/stderr
+  before cleanup, so rerun to see the actual error.
+- The LLM auto-retries with the real stderr (up to `MAX_SANDBOX_RETRIES`).
+- Rebuild the image with the current Dockerfile if it's stale on this machine:
+  `docker build -t sandbox-python -f Dockerfile.sandbox .`
+- If pandas/openpyxl workbooks are large, raise `SANDBOX_MEM_LIMIT` in `.env`
 
 ### Security scan blocks my code
 - Review the security issues in the scan output

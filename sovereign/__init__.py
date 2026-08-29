@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-__version__ = "3.0.0"
+__version__ = "3.0.1"
 
 
 def sanitize_ssl_env() -> None:

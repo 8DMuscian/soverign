@@ -61,6 +61,62 @@ def validate_file(state: OrchestratorState) -> dict:
 # ────────────────────────────────────────────────────────────
 # NODE: build_prompt
 # ────────────────────────────────────────────────────────────
+def _file_preview(path: str, max_chars: int = 1500) -> str:
+    """Return a compact structural preview of the target file so the LLM
+    doesn't have to guess column names or schema.
+
+    Supports .xlsx, .csv, and .docx; returns "" if reading fails so the
+    pipeline never breaks just because a preview could not be built.
+    """
+    try:
+        file_path = Path(path)
+        ext = file_path.suffix.lower()
+
+        if ext == ".xlsx":
+            import openpyxl
+
+            wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
+            try:
+                parts: list[str] = []
+                for ws in wb.worksheets[:3]:
+                    rows = list(ws.iter_rows(values_only=True))
+                    if not rows:
+                        continue
+                    parts.append(f"[Sheet '{ws.title}']")
+                    parts.append(
+                        "Columns: " + ", ".join(str(h) for h in rows[0])
+                    )
+                    for row in rows[1:4]:
+                        parts.append(" | ".join(str(c) for c in row))
+            finally:
+                wb.close()
+            return "\n".join(parts)[:max_chars]
+
+        if ext == ".csv":
+            import csv
+
+            with open(
+                file_path, newline="", encoding="utf-8", errors="replace"
+            ) as fh:
+                rows = list(csv.reader(fh))[:5]
+            if not rows:
+                return ""
+            headings = ["Columns: " + ", ".join(rows[0])]
+            headings += [" | ".join(r) for r in rows[1:]]
+            return "\n".join(headings)[:max_chars]
+
+        if ext == ".docx":
+            from docx import Document
+
+            doc = Document(str(file_path))
+            paras = [p.text for p in doc.paragraphs if p.text.strip()]
+            return "\n".join(paras[:12])[:max_chars]
+
+    except Exception:
+        pass
+    return ""
+
+
 def build_prompt(state: OrchestratorState, runtime: Runtime[ContextSchema]) -> dict:
     """Construct the initial chat messages for the LLM.
 
@@ -72,6 +128,15 @@ def build_prompt(state: OrchestratorState, runtime: Runtime[ContextSchema]) -> d
     filename = state.get("filename", "")
     user_prompt = state["user_prompt"]
     agent_config = runtime.context.agent_config
+
+    # Give the model the actual file structure instead of letting it guess
+    # column/sheet names (a common source of sandbox exit-1 failures).
+    preview = _file_preview(state.get("file_path", ""))
+    if preview:
+        user_prompt = (
+            f"{user_prompt}\n\n"
+            f"FILE PREVIEW (first rows/columns of `{filename}`):\n{preview}"
+        )
 
     if agent_config:
         system_prompt = agent_config.system_prompt
@@ -245,11 +310,26 @@ def confirm(state: OrchestratorState) -> dict:
 # ────────────────────────────────────────────────────────────
 # NODE: run_sandbox
 # ────────────────────────────────────────────────────────────
+def _decode_logs(raw) -> str:
+    """Decode docker log bytes into a UTF-8/ASCII-safe string."""
+    if not raw:
+        return ""
+    if isinstance(raw, bytes):
+        return raw.decode("utf-8", errors="replace")
+    return str(raw)
+
+
 def run_sandbox(
     state: OrchestratorState, runtime: Runtime[ContextSchema]
 ) -> dict:
     """Write generated code to a temp file, run it in an isolated
     Docker container, and return the results.
+
+    The container is run detached and removed manually so that the
+    real stdout/stderr can be captured *before* cleanup.  (The Docker
+    SDK's auto-remove deletes the container before ``ContainerError``
+    is built, which turned every sandbox failure into an empty ``b''``
+    and hid the actual Python traceback.)
     """
     code = state["code"]
     mount_dir = Path(state["file_dir"])
@@ -282,14 +362,21 @@ def run_sandbox(
                     "  Make sure Docker Desktop is running."
                 ),
                 "exit_code": -1,
+                "image": sandbox_image,
             },
         }
 
     script_path = mount_dir / ".__orchestrator_sandbox_script__.py"
+    container = None
+    exit_code = -1
+    stdout = ""
+    stderr = ""
+    timed_out = False
+
     try:
         script_path.write_text(code, encoding="utf-8")
 
-        result = client.containers.run(
+        container = client.containers.run(
             image=sandbox_image,
             command=[
                 "python",
@@ -299,40 +386,73 @@ def run_sandbox(
                 str(mount_dir): {"bind": "/workspace", "mode": "rw"}
             },
             network_disabled=True,
-            remove=True,
+            detach=True,
             mem_limit=sandbox_mem_limit,
             cpu_period=100_000,
             cpu_quota=50_000,
-            stderr=True,
-            stdout=True,
         )
 
-        output = (
-            result.decode("utf-8", errors="replace").strip()
-            if result
-            else ""
+        # Wait for the script to finish (wires SANDBOX_TIMEOUT, which was
+        # previously never passed to the container run).
+        try:
+            wait_result = container.wait(timeout=sandbox_timeout)
+        except Exception as exc:
+            timed_out = True
+            exit_code = -1
+            stderr = (
+                f"Sandbox timed out after {sandbox_timeout}s — "
+                f"the script did not exit. {exc}"
+            )
+            try:
+                container.kill()
+            except Exception:
+                pass
+        else:
+            exit_code = int(wait_result.get("StatusCode", -1))
+
+        # Fetch logs BEFORE removal so failures keep their tracebacks.
+        stdout = _decode_logs(
+            container.logs(stdout=True, stderr=False, timestamps=False)
         )
+        stderr = (
+            _decode_logs(
+                container.logs(stdout=False, stderr=True, timestamps=False)
+            )
+            if not timed_out
+            else stderr
+        )
+
+        # Distinguish a script that ran cleanly from one that failed.
+        if not timed_out:
+            stderr = stderr or (
+                f"Process exited with status {exit_code} and produced no "
+                "error output."
+                if exit_code != 0
+                else ""
+            )
+
         return {
             "sandbox_attempts": attempt,
             "sandbox_result": {
-                "stdout": output,
-                "stderr": "",
-                "exit_code": 0,
+                "stdout": stdout,
+                "stderr": stderr,
+                "exit_code": exit_code,
+                "image": sandbox_image,
             },
         }
 
-    except docker.errors.ContainerError as exc:
-        stderr_out = (
-            exc.stderr.decode("utf-8", errors="replace")
-            if exc.stderr
-            else ""
-        )
+    except docker.errors.ImageNotFound as exc:
         return {
             "sandbox_attempts": attempt,
             "sandbox_result": {
                 "stdout": "",
-                "stderr": stderr_out or str(exc),
-                "exit_code": exc.exit_status,
+                "stderr": (
+                    f"Sandbox image not found: {exc}\n"
+                    "  Build it once: docker build -t sandbox-python "
+                    "-f Dockerfile.sandbox ."
+                ),
+                "exit_code": -1,
+                "image": sandbox_image,
             },
         }
 
@@ -343,10 +463,16 @@ def run_sandbox(
                 "stdout": "",
                 "stderr": f"Sandbox error: {exc}",
                 "exit_code": -1,
+                "image": sandbox_image,
             },
         }
 
     finally:
+        if container is not None:
+            try:
+                container.remove(force=True)
+            except Exception:
+                pass
         try:
             script_path.unlink(missing_ok=True)
         except OSError:

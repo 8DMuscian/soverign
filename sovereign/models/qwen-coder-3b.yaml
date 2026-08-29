@@ -1,7 +1,7 @@
 name: "Qwen Coder 3B"
 id: "Qwen/Qwen2.5-Coder-3B-Instruct-AWQ"
 description: "Fast code generation for data/document processing tasks"
-base_url: "http://localhost:8000/v1"
+base_url: "https://scheming-blazer-silt.ngrok-free.dev/v1"
 api_key: "not-needed"
 capabilities:
   - code_generation

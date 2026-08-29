@@ -264,6 +264,9 @@ with tab_work:
                         temperature=model_config.temperature,
                         max_tokens=model_config.max_tokens,
                         timeout=120,
+                        default_headers={
+                            "Ngrok-Skip-Browser-Warning": "true",
+                        },
                     )
 
                     ctx = ContextSchema(
@@ -272,7 +275,7 @@ with tab_work:
                         agent_config=selected_agent,
                         sandbox_image=os.getenv("SANDBOX_IMAGE", "sandbox-python:latest"),
                         sandbox_timeout=sandbox_timeout,
-                        sandbox_mem_limit=os.getenv("SANDBOX_MEM_LIMIT", "512m"),
+                        sandbox_mem_limit=os.getenv("SANDBOX_MEM_LIMIT", "1g"),
                     )
 
                     initial_state = {

@@ -59,6 +59,14 @@ class ModelConfig:
 # MODEL REGISTRY
 # ────────────────────────────────────────────────────────────
 
+# ngrok free-tier tunnels serve an HTML interstitial to non-browser
+# requests; this header bypasses it so API clients parse real JSON.
+_NGROK_HEADERS = {
+    "Ngrok-Skip-Browser-Warning": "true",
+    "User-Agent": "sovereign-orchestrator/3.0",
+}
+
+
 class ModelRegistry:
     """Auto-discovers ``*.yaml`` files in the ``models/`` directory.
 
@@ -129,7 +137,8 @@ class ModelRegistry:
             url = url + "/v1/models"
 
         try:
-            with urllib.request.urlopen(url, timeout=timeout) as resp:
+            req = urllib.request.Request(url, headers=_NGROK_HEADERS)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             return [m.get("id", "") for m in data.get("data", []) if m.get("id")]
         except Exception as exc:

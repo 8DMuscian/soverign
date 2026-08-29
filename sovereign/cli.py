@@ -30,7 +30,7 @@ def main() -> None:
         "SANDBOX_IMAGE", "sandbox-python:latest"
     )
     sandbox_timeout: int = int(os.getenv("SANDBOX_TIMEOUT", "60"))
-    sandbox_mem_limit: str = os.getenv("SANDBOX_MEM_LIMIT", "512m")
+    sandbox_mem_limit: str = os.getenv("SANDBOX_MEM_LIMIT", "1g")
 
     # ── CLI arguments ──────────────────────────────────────
     parser = argparse.ArgumentParser(
@@ -202,6 +202,9 @@ def main() -> None:
         temperature=model_config.temperature,
         max_tokens=model_config.max_tokens,
         timeout=120,
+        default_headers={
+            "Ngrok-Skip-Browser-Warning": "true",
+        },
     )
 
     # ── Build context ──────────────────────────────────────
